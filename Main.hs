@@ -27,6 +27,7 @@ data S = S
   { energy :: Integer
   , harmonics :: Harmonics
   , matrix :: Model
+  , floaters :: Model
   , todo :: Model
   , bots :: [Bot]
   } deriving (Show, Eq)
@@ -43,7 +44,7 @@ runBuilder :: Model -> Builder () -> Either String S.Put
 runBuilder model = fmap (snd . fst) . runExcept . flip runStateT (s_init model) . runWriterT . unBuilder
 
 s_init :: Model -> S
-s_init model = S 0 Low Set.empty model [Bot 1 (Coord 0 0 0) [2..20]]
+s_init model = S 0 Low Set.empty Set.empty model [Bot 1 (Coord 0 0 0) [2..20]]
 
 putAsW8 :: Int16 -> S.Put
 putAsW8 = S.putWord8 . toEnum . fromEnum
@@ -79,13 +80,14 @@ diffND :: Coord -> Coord -> ND
 diffND (Coord x1 y1 z1) (Coord x2 y2 z2) = ND (x1 - x2) (y1 - y2) (z1 - z2)
 
 out :: Command -> Builder ()
-out = tell . S.put
+out c = tell (S.put c)
 
 halt :: Builder ()
 halt = do
   s <- get
   unless (harmonics s == Low) $ throwError "halt: Harmonics is not low"
   unless (Set.null (todo s)) $ throwError $ "halt: Model not finished: " ++ show (todo s) 
+  unless (Set.null (floaters s)) $ throwError $ "halt: Still floating cells: " ++ show (floaters s) 
   unless (length (bots s) == 1) $ throwError "halt: More than one bot still active"
   let bot = head (bots s)
   unless (pos bot == Coord 0 0 0) $ throwError "halt: Bot is not at origin"
@@ -100,6 +102,17 @@ flipHarmonics = do
   s <- get
   out Flip
   put $ s { harmonics = toEnum $ 1 - fromEnum (harmonics s) }
+
+harmonicsHigh :: Builder ()
+harmonicsHigh = do
+  s <- get
+  unless (harmonics s == High) flipHarmonics
+
+harmonicsLow :: Builder ()
+harmonicsLow = do
+  s <- get
+  unless (Set.null (floaters s)) $ throwError $ "harmonicsLow: Still floating cells: " ++ show (floaters s) 
+  unless (harmonics s == Low) flipHarmonics
 
 sMove :: LLD -> Builder ()
 sMove lld@(LLD dim d) = do
@@ -130,15 +143,30 @@ fill :: ND -> Builder ()
 fill nd = do
   s <- get
   let [bot] = bots s
-  let c' = addND nd $ pos bot
+  let c'@(Coord _ y _) = addND nd $ pos bot
+  let floats = y > 0 && Set.null (neighbors c' `Set.intersection` (matrix s `Set.difference` floaters s))
+  when floats harmonicsHigh
   unless (c' `Set.notMember` matrix s) $ throwError "fill: Already filled"
   unless (c' `Set.member` todo s) $ throwError "fill: Not in the model"
   out $ Fill nd
-  put $ s {
+  s <- get
+  let s' = s {
     matrix = Set.insert c' (matrix s),
     todo = Set.delete c' (todo s),
+    floaters = if floats then Set.insert c' (floaters s) else checkGrounded c' (floaters s),
     energy = energy s + 12
   }
+  put s'
+  unless (floats || not (Set.null (floaters s'))) harmonicsLow
+
+
+checkGrounded :: Coord -> Model -> Model
+checkGrounded _ model | Set.null model = model
+checkGrounded c model = model''
+  where
+    remove = neighbors c `Set.intersection` model
+    model' = model `Set.difference` remove
+    model'' = foldr checkGrounded model' remove
 
 sMoveLim :: LLD -> Builder ()
 sMoveLim (LLD dim d) = 
@@ -180,14 +208,21 @@ moveTo c'@(Coord x' y' z') = do
 
 cross :: [ND]
 cross = [ND 0 (-1) 0, ND 1 (-1) 0, ND 0 (-1) 1, ND (-1) (-1) 0, ND 0 (-1) (-1)]
+mlen1 :: [ND]
+mlen1 = [ND 0 (-1) 0, ND 1 0 0, ND 0 0 1, ND (-1) 0 0, ND 0 0 (-1), ND 0 1 0]
+
+toModel :: [ND] -> Coord -> Model
+toModel nds c = Set.fromList $ map (\nd -> addND nd c) nds
 
 crossBelow :: Coord -> Model
-crossBelow c = Set.fromList $ map (\nd -> addND nd c) cross
+crossBelow = toModel cross
+
+neighbors :: Coord -> Model
+neighbors = toModel mlen1
 
 solveSimpleCross :: Int16 -> Builder ()
 solveSimpleCross r = do
   let r2 = r `div` 2
-  flipHarmonics
   
   for_ [1 .. r] $ \y ->
     for_ [-r2 .. r2] $ \z'' -> do
@@ -196,7 +231,6 @@ solveSimpleCross r = do
         let x' = if even z' then negate x'' else x''
         let z = z' * 2 - x' + r2
         let x = x' * 2 + z' + r2
-        -- traceShowM (x, z)
         s <- get
         let c = Coord x y z
         let i = crossBelow c `Set.intersection` todo s
@@ -204,7 +238,6 @@ solveSimpleCross r = do
           moveTo (Coord x y z)
           for_ i $ fill . (`diffND` c)
 
-  flipHarmonics
   s <- get
   let [Bot _ (Coord _ y _) _] = bots s
   moveTo (Coord 0 y 0)
