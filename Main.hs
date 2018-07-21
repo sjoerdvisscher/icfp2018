@@ -5,8 +5,12 @@ module Main where
 import GHC.Int (Int16)
 import Data.Foldable (for_)
 import Data.Bits (testBit, shift)
+import Data.Map.Strict (Map)
+import Data.List (sortOn)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
 import qualified Data.ByteString as BS
 import qualified Data.Serialize as S
 import Control.Monad (unless)
@@ -17,6 +21,7 @@ import Debug.Trace
 
 data Coord = Coord !Int16 !Int16 !Int16 deriving (Show, Eq, Ord)
 type Model = Set Coord
+type AnnModel = Map Coord Int16
 data Dim = X | Y | Z deriving (Show, Eq, Ord, Enum)
 data LLD = LLD !Dim !Int16 deriving (Show, Eq, Ord)
 data SLD = SLD !Dim !Int16 deriving (Show, Eq, Ord)
@@ -28,7 +33,7 @@ data S = S
   , harmonics :: Harmonics
   , matrix :: Model
   , floaters :: Model
-  , todo :: Model
+  , todo :: AnnModel
   , bots :: [Bot]
   } deriving (Show, Eq)
 data Bot = Bot 
@@ -40,10 +45,10 @@ data Bot = Bot
 newtype Builder a = Builder { unBuilder :: WriterT S.Put (StateT S (Except String)) a }
   deriving (Functor, Applicative, Monad, MonadWriter S.Put, MonadState S, MonadError String)
 
-runBuilder :: Model -> Builder () -> Either String S.Put
+runBuilder :: AnnModel -> Builder () -> Either String S.Put
 runBuilder model = fmap (snd . fst) . runExcept . flip runStateT (s_init model) . runWriterT . unBuilder
 
-s_init :: Model -> S
+s_init :: AnnModel -> S
 s_init model = S 0 Low Set.empty Set.empty model [Bot 1 (Coord 0 0 0) [2..20]]
 
 putAsW8 :: Int16 -> S.Put
@@ -79,6 +84,9 @@ addND (ND dx dy dz) (Coord x y z) = Coord (x + dx) (y + dy) (z + dz)
 diffND :: Coord -> Coord -> ND
 diffND (Coord x1 y1 z1) (Coord x2 y2 z2) = ND (x1 - x2) (y1 - y2) (z1 - z2)
 
+onFloor :: Coord -> Bool
+onFloor (Coord _ y _) = y == 0
+
 out :: Command -> Builder ()
 out c = tell (S.put c)
 
@@ -86,7 +94,7 @@ halt :: Builder ()
 halt = do
   s <- get
   unless (harmonics s == Low) $ throwError "halt: Harmonics is not low"
-  unless (Set.null (todo s)) $ throwError $ "halt: Model not finished: " ++ show (todo s) 
+  unless (Map.null (todo s)) $ throwError $ "halt: Model not finished: " ++ show (todo s) 
   unless (Set.null (floaters s)) $ throwError $ "halt: Still floating cells: " ++ show (floaters s) 
   unless (length (bots s) == 1) $ throwError "halt: More than one bot still active"
   let bot = head (bots s)
@@ -143,16 +151,16 @@ fill :: ND -> Builder ()
 fill nd = do
   s <- get
   let [bot] = bots s
-  let c'@(Coord _ y _) = addND nd $ pos bot
-  let floats = y > 0 && Set.null (neighbors c' `Set.intersection` (matrix s `Set.difference` floaters s))
+  let c' = addND nd $ pos bot
+  let floats = not (onFloor c') && Set.null (neighbors c' `Set.intersection` (matrix s `Set.difference` floaters s))
   when floats harmonicsHigh
   unless (c' `Set.notMember` matrix s) $ throwError "fill: Already filled"
-  unless (c' `Set.member` todo s) $ throwError "fill: Not in the model"
+  unless (c' `Map.member` todo s) $ throwError "fill: Not in the model"
   out $ Fill nd
   s <- get
   let s' = s {
     matrix = Set.insert c' (matrix s),
-    todo = Set.delete c' (todo s),
+    todo = Map.delete c' (todo s),
     floaters = if floats then Set.insert c' (floaters s) else checkGrounded c' (floaters s),
     energy = energy s + 12
   }
@@ -220,6 +228,10 @@ crossBelow = toModel cross
 neighbors :: Coord -> Model
 neighbors = toModel mlen1
 
+spiral :: [[[(Int16, Int16)]]]
+spiral = [[(1, 0)], [(0, 1)], [(-1, 0), (-1, 0)], [(0, -1), (0, -1)]] : 
+  map (\[r,d,l,u] -> [[(1, 0), (1, 0)] ++ r, [(0, 1), (0, 1)] ++ d, [(-1, 0), (-1, 0)] ++ l, [(0, -1), (0, -1)] ++ u]) spiral
+
 solveSimpleCross :: Int16 -> Builder ()
 solveSimpleCross r = do
   let r2 = r `div` 2
@@ -233,10 +245,11 @@ solveSimpleCross r = do
         let x = x' * 2 + z' + r2
         s <- get
         let c = Coord x y z
-        let i = crossBelow c `Set.intersection` todo s
-        unless (Set.null i) $ do
+        let i = todo s `Map.intersection` Map.fromSet (const ()) (crossBelow c)
+        unless (Map.null i) $ do
+          let pairs = sortOn snd $ Map.toList i
           moveTo (Coord x y z)
-          for_ i $ fill . (`diffND` c)
+          for_ pairs $ fill . (`diffND` c) . fst
 
   s <- get
   let [Bot _ (Coord _ y _) _] = bots s
@@ -259,14 +272,27 @@ loadModel bs =
   where
     r = toEnum . fromEnum $ bs `BS.index` 0
 
-printModel :: Model -> IO ()
+printModel :: AnnModel -> IO ()
 printModel model =
   for_ [0 .. 20] $ \y -> do
     for_ [0 .. 20] $ \z -> do
       for_ [0 .. 20] $ \x -> do
-        putChar (if Coord x y z `Set.member` model then '#' else '+')
+        putStr (maybe "+" show $ Coord x y z `Map.lookup` model)
       putChar '\n'
     putChar '\n'
+
+annModel :: Model -> AnnModel
+annModel model = check (Seq.fromList $ Set.toList start) (Map.fromSet (const 0) start)
+  where 
+    start = Set.filter onFloor model
+    check s ann = case Seq.viewl s of 
+      Seq.EmptyL -> ann
+      c Seq.:< cs -> 
+        ann'' where
+          d = ann Map.! c + 1
+          visit = Set.filter (\c' -> c' `Map.notMember` ann && c' `Set.member` model) (neighbors c)
+          ann' = Map.fromSet (const d) visit `Map.union` ann
+          ann'' = check (cs Seq.>< Seq.fromList (Set.toList visit)) ann'
 
 load :: String -> IO (Int16, Model)
 load name = loadModel <$> BS.readFile name
@@ -280,5 +306,5 @@ main = do
     let ns = take (3 - length (show n)) "00" ++ show n
     putStrLn ns
     (r, model) <- load ("problemsL/LA" ++ ns ++ "_tgt.mdl")
-    let result = runBuilder model (solveSimpleCross r)
+    let result = runBuilder (annModel model) (solveSimpleCross r)
     either putStrLn (save ("out/LA" ++ ns ++ ".nbt")) result
