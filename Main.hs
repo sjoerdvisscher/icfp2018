@@ -339,15 +339,13 @@ main = do
   for_ [1::Int .. 186] $ \n -> do
     let ns = take (3 - length (show n)) "00" ++ show n
     putStrLn ('A':ns)
-    (r, model) <- load ("problemsF/FA" ++ ns ++ "_tgt.mdl")
-    let result = runBuilderA (annModel model) (solveSimpleCross r)
-    either putStrLn (save ("outF/FA" ++ ns ++ ".nbt")) result
-  for_ [1::Int .. 186] $ \n -> do
-    let ns = take (3 - length (show n)) "00" ++ show n
+    (rA, modelA) <- load ("problemsF/FA" ++ ns ++ "_tgt.mdl")
+    let resultA = runBuilder (annModel modelA) (solveSimpleCross rA)
+    either putStrLn (save ("outF/FA" ++ ns ++ ".nbt") . fst) resultA
     putStrLn ('D':ns)
-    (r, model) <- load ("problemsF/FD" ++ ns ++ "_src.mdl")
-    let result = runBuilderD (annModel model) (solveSimpleCross r)
-    either putStrLn (save ("outF/FD" ++ ns ++ ".nbt")) result
+    (rD, modelD) <- load ("problemsF/FD" ++ ns ++ "_src.mdl")
+    let resultD = if modelA == modelD then resultA else runBuilder (annModel modelD) (solveSimpleCross rD)
+    either putStrLn (save ("outF/FD" ++ ns ++ ".nbt") . getDual . snd) resultD
   for_ [1::Int .. 115] $ \n -> do
     let ns = take (3 - length (show n)) "00" ++ show n
     putStrLn ('R':ns)
