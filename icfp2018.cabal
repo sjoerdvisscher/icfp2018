@@ -19,6 +19,7 @@ executable icfp2018
   build-depends:        base >=4.10 && <5,
                         cereal,
                         containers,
-                        bytestring
+                        bytestring,
+                        mtl
   -- hs-source-dirs:
   default-language:     Haskell2010
