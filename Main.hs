@@ -7,6 +7,7 @@ import Data.Foldable (for_)
 import Data.Bits (testBit, shift)
 import Data.Map.Strict (Map)
 import Data.List (sortOn)
+import Data.Monoid (Dual(getDual))
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -26,7 +27,10 @@ data Dim = X | Y | Z deriving (Show, Eq, Ord, Enum)
 data LLD = LLD !Dim !Int16 deriving (Show, Eq, Ord)
 data SLD = SLD !Dim !Int16 deriving (Show, Eq, Ord)
 data ND = ND !Int16 !Int16 !Int16 deriving (Show, Eq, Ord)
-data Command = Halt | Wait | Flip | SMove !LLD | LMove !SLD !SLD | FusionP !ND | FusionS !ND | Fission !ND !Int16 | Fill !ND deriving (Show, Eq, Ord)
+data Command = Commence | Halt | Wait | Flip 
+  | SMove !LLD | LMove !SLD !SLD 
+  | FusionP !ND | FusionS !ND | Fission !ND !Int16 
+  | Fill !ND | Void !ND deriving (Show, Eq, Ord)
 data Harmonics = High | Low deriving (Show, Eq, Ord, Enum)
 data S = S 
   { energy :: Integer
@@ -42,11 +46,17 @@ data Bot = Bot
   , seeds :: [Int16]
   } deriving (Show, Eq)
   
-newtype Builder a = Builder { unBuilder :: WriterT S.Put (StateT S (Except String)) a }
-  deriving (Functor, Applicative, Monad, MonadWriter S.Put, MonadState S, MonadError String)
+newtype Builder a = Builder { unBuilder :: WriterT (S.Put, Dual S.Put) (StateT S (Except String)) a }
+  deriving (Functor, Applicative, Monad, MonadWriter (S.Put, Dual S.Put), MonadState S, MonadError String)
 
-runBuilder :: AnnModel -> Builder () -> Either String S.Put
+runBuilder :: AnnModel -> Builder () -> Either String (S.Put, Dual S.Put)
 runBuilder model = fmap (snd . fst) . runExcept . flip runStateT (s_init model) . runWriterT . unBuilder
+
+runBuilderA :: AnnModel -> Builder () -> Either String S.Put
+runBuilderA model = fmap fst . runBuilder model
+
+runBuilderD :: AnnModel -> Builder () -> Either String S.Put
+runBuilderD model = fmap (getDual . snd) . runBuilder model
 
 s_init :: AnnModel -> S
 s_init model = S 0 Low Set.empty Set.empty model [Bot 1 (Coord 0 0 0) [2..20]]
@@ -55,6 +65,7 @@ putAsW8 :: Int16 -> S.Put
 putAsW8 = S.putWord8 . toEnum . fromEnum
 
 instance S.Serialize Command where
+  put Commence = pure ()
   put Halt = S.putWord8 0b11111111
   put Wait = S.putWord8 0b11111110
   put Flip = S.putWord8 0b11111101
@@ -70,8 +81,19 @@ instance S.Serialize Command where
     putAsW8 $ ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) `shift` 3 + 0b101
     putAsW8 m
   put (Fill (ND dx dy dz)) = putAsW8 $ ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) `shift` 3 + 0b011
+  put (Void (ND dx dy dz)) = putAsW8 $ ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) `shift` 3 + 0b010
   get = undefined
 
+op :: Command -> Command
+op Commence = Halt
+op Halt = Commence
+op Wait = Wait
+op Flip = Flip
+op (SMove (LLD dim d)) = SMove (LLD dim (negate d))
+op (LMove (SLD dim1 d1) (SLD dim2 d2)) = LMove (SLD dim1 (negate d1)) (SLD dim2 (negate d2))
+op (Fill nd) = Void nd
+op (Void nd) = Fill nd
+op _ = error "op: unsupported"
 
 straight :: Dim -> Int16 -> Coord -> Coord
 straight X dx (Coord x y z) = Coord (x + dx) y z
@@ -88,7 +110,10 @@ onFloor :: Coord -> Bool
 onFloor (Coord _ y _) = y == 0
 
 out :: Command -> Builder ()
-out c = tell (S.put c)
+out c = tell (S.put c, Dual (S.put (op c)))
+
+commence :: Builder ()
+commence = pure ()
 
 halt :: Builder ()
 halt = do
@@ -99,7 +124,6 @@ halt = do
   unless (length (bots s) == 1) $ throwError "halt: More than one bot still active"
   let bot = head (bots s)
   unless (pos bot == Coord 0 0 0) $ throwError "halt: Bot is not at origin"
-  out Halt
   put $ s { bots = [] }
   
 wait :: Builder ()
@@ -238,9 +262,11 @@ spiraling start = scanl (\(x, y) (dx, dy) -> (x + dx, y + dy)) start $ concat (c
 solveSimpleCross :: Int16 -> Builder ()
 solveSimpleCross r = do
   let r2 = r `div` 2
+
+  commence
   
   for_ [1 .. r] $ \y ->
-    for_ (take (fromEnum $ r * r) (spiraling (0, 0))) $ \(x', z') -> do
+    for_ (take (fromEnum r * fromEnum r) (spiraling (0, 0))) $ \(x', z') -> do
         let z = z' * 2 - x' + r2
         let x = x' * 2 + z' + r2
         s <- get
@@ -298,7 +324,7 @@ load :: String -> IO (Int16, Model)
 load name = loadModel <$> BS.readFile name
 
 save :: String -> S.Put -> IO ()
-save name p = BS.writeFile name (S.runPut p)
+save name p = BS.writeFile name (S.runPut (p <> S.put Halt))
 
 main :: IO ()
 main = do
@@ -312,7 +338,21 @@ main = do
   -- Full
   for_ [1::Int .. 186] $ \n -> do
     let ns = take (3 - length (show n)) "00" ++ show n
-    putStrLn ns
+    putStrLn ('A':ns)
     (r, model) <- load ("problemsF/FA" ++ ns ++ "_tgt.mdl")
-    let result = runBuilder (annModel model) (solveSimpleCross r)
+    let result = runBuilderA (annModel model) (solveSimpleCross r)
     either putStrLn (save ("outF/FA" ++ ns ++ ".nbt")) result
+  for_ [1::Int .. 186] $ \n -> do
+    let ns = take (3 - length (show n)) "00" ++ show n
+    putStrLn ('D':ns)
+    (r, model) <- load ("problemsF/FD" ++ ns ++ "_src.mdl")
+    let result = runBuilderD (annModel model) (solveSimpleCross r)
+    either putStrLn (save ("outF/FD" ++ ns ++ ".nbt")) result
+  for_ [1::Int .. 115] $ \n -> do
+    let ns = take (3 - length (show n)) "00" ++ show n
+    putStrLn ('R':ns)
+    (r, modelD) <- load ("problemsF/FR" ++ ns ++ "_src.mdl")
+    let resultD = runBuilderD (annModel modelD) (solveSimpleCross r)
+    (_, modelA) <- load ("problemsF/FR" ++ ns ++ "_tgt.mdl")
+    let resultA = runBuilderA (annModel modelA) (solveSimpleCross r)
+    either putStrLn (\outD -> either putStrLn (\outA -> save ("outF/FR" ++ ns ++ ".nbt") (outD <> outA)) resultA) resultD
