@@ -143,11 +143,11 @@ moveTo c'@(Coord x' y' z') = do
   let dx = x' - x
   let dy = y' - y
   let dz = z' - z
-  if abs dx > 5 then do
-    sMoveLim (LLD X dx)
-    moveTo c'
-  else if abs dy > 5 then do
+  if abs dy > 5 then do
     sMoveLim (LLD Y dy)
+    moveTo c'
+  else if abs dx > 5 then do
+    sMoveLim (LLD X dx)
     moveTo c'
   else if abs dz > 5 then do
     sMoveLim (LLD Z dz)
@@ -157,10 +157,10 @@ moveTo c'@(Coord x' y' z') = do
   else if dy == 0 then
     lMove (SLD X dx) (SLD Z dz)
   else if dz == 0 then
-    lMove (SLD X dx) (SLD Y dy)
+    lMove (SLD Y dy) (SLD X dx)
   else do
-    sMove (LLD X dx)
-    lMove (SLD Y dy) (SLD Z dz)
+    sMove (LLD Y dy)
+    lMove (SLD Z dz) (SLD Z dz)
 
 
 loadModel :: BS.ByteString -> Model
