@@ -232,15 +232,15 @@ spiral :: [[[(Int16, Int16)]]]
 spiral = [[(1, 0)], [(0, 1)], [(-1, 0), (-1, 0)], [(0, -1), (0, -1)]] : 
   map (\[r,d,l,u] -> [[(1, 0), (1, 0)] ++ r, [(0, 1), (0, 1)] ++ d, [(-1, 0), (-1, 0)] ++ l, [(0, -1), (0, -1)] ++ u]) spiral
 
+spiraling :: (Int16, Int16) -> [(Int16, Int16)]
+spiraling start = scanl (\(x, y) (dx, dy) -> (x + dx, y + dy)) start $ concat (concat spiral)
+
 solveSimpleCross :: Int16 -> Builder ()
 solveSimpleCross r = do
   let r2 = r `div` 2
   
   for_ [1 .. r] $ \y ->
-    for_ [-r2 .. r2] $ \z'' -> do
-      for_ [-r2 .. r2] $ \x'' -> do
-        let z' = if even y then negate z'' else z''
-        let x' = if even z' then negate x'' else x''
+    for_ (take (fromEnum $ r * r) (spiraling (0, 0))) $ \(x', z') -> do
         let z = z' * 2 - x' + r2
         let x = x' * 2 + z' + r2
         s <- get
@@ -302,9 +302,17 @@ save name p = BS.writeFile name (S.runPut p)
 
 main :: IO ()
 main = do
+  -- Lightning
+  -- for_ [1::Int .. 186] $ \n -> do
+  --   let ns = take (3 - length (show n)) "00" ++ show n
+  --   putStrLn ns
+  --   (r, model) <- load ("problemsL/LA" ++ ns ++ "_tgt.mdl")
+  --   let result = runBuilder (annModel model) (solveSimpleCross r)
+  --   either putStrLn (save ("outL/LA" ++ ns ++ ".nbt")) result
+  -- Full
   for_ [1::Int .. 186] $ \n -> do
     let ns = take (3 - length (show n)) "00" ++ show n
     putStrLn ns
-    (r, model) <- load ("problemsL/LA" ++ ns ++ "_tgt.mdl")
+    (r, model) <- load ("problemsF/FA" ++ ns ++ "_tgt.mdl")
     let result = runBuilder (annModel model) (solveSimpleCross r)
-    either putStrLn (save ("out/LA" ++ ns ++ ".nbt")) result
+    either putStrLn (save ("outF/FA" ++ ns ++ ".nbt")) result
